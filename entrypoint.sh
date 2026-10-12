@@ -26,7 +26,7 @@ kv()      { printf '   %s%-8s%s %s\n' "$D" "$1" "$RS" "$2"; }
 
 banner() {
   printf '\n%s╭──────────────────────────────────────────────────╮%s\n' "$BLU" "$RS"
-  printf '%s│%s  %sxray-railway%s  %s·%s  VLESS  %s·%s  WS + gRPC             %s│%s\n' \
+  printf '%s│%s  %sxray-railway%s  %s·%s  VLESS  %s·%s  WS + gRPC            %s│%s\n' \
     "$BLU" "$RS" "$B" "$RS" "$D" "$RS" "$D" "$RS" "$BLU" "$RS"
   printf '%s╰──────────────────────────────────────────────────╯%s\n' "$BLU" "$RS"
 }
@@ -64,7 +64,8 @@ if [ -z "$UUID" ]; then
   else
     SEED_STR="${RAILWAY_PROJECT_ID:-}${RAILWAY_SERVICE_ID:-}${RAILWAY_ENVIRONMENT_ID:-}${SEED}"
     if [ -n "$SEED_STR" ]; then
-      UUID=$(xray uuid -i "xray-railway:$SEED_STR" 2>/dev/null || true)
+      H=$(printf '%s' "xray-railway:$SEED_STR" | sha256sum | cut -c1-32)
+      UUID="$(echo "$H" | cut -c1-8)-$(echo "$H" | cut -c9-12)-5$(echo "$H" | cut -c14-16)-a$(echo "$H" | cut -c18-20)-$(echo "$H" | cut -c21-32)"
       UUID_SRC='автоген. (стабильный, из ID сервиса Railway)'
     fi
     if [ -z "$UUID" ]; then
