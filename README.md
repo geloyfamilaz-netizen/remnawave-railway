@@ -1,31 +1,29 @@
-# Remnawave test environment on Railway
+# xray-railway
 
-Deploys the [Remnawave](https://docs.rw) panel (`remnawave/backend`) on Railway, with Railway-managed PostgreSQL and Redis. For testing only.
+Xray-core on Railway: VLESS over WebSocket or gRPC. TLS is terminated by Railway's edge, xray listens on plain TCP on `$PORT`.
 
-Based on the official docs: <https://docs.rw/install/remnawave-panel> and <https://docs.rw/install/environment-variables>.
-
-## Architecture
-
-| Service | Source | Notes |
-| --- | --- | --- |
-| `remnawave` | this repo (Dockerfile) | Panel API + UI, port `3000` |
-| `Postgres` | Railway database template | Provides `DATABASE_URL` |
-| `Redis` | Railway database template | Replaces the Valkey unix socket used in the official compose file |
-
-Railway terminates HTTPS for you, so no separate reverse proxy is needed. The docs require the panel to be served behind a reverse proxy over HTTPS, and Railway's public domain does that.
+One image, two modes selected by `MODE`. Railway gives one public port per service, so deploy the same repo twice to get both transports.
 
 ## Deploy
 
-1. In Railway: **New Project → Deploy from GitHub repo** and pick this repo. It builds from `Dockerfile`.
-2. In the same project: **+ New → Database → Add PostgreSQL**, then **+ New → Database → Add Redis**. Keep the default service names `Postgres` and `Redis` (the variable references below rely on them).
-3. On the `remnawave` service, open **Variables → Raw Editor** and paste the contents of `.env.example`. Replace every `change_me` with a value from `openssl rand -hex 64`. `WEBHOOK_SECRET_HEADER` must be exactly 64 characters, `a-z A-Z 0-9` only (`openssl rand -hex 32` gives 64 hex chars).
-4. **Settings → Networking → Generate Domain**, and set the target port to `3000`.
-5. Redeploy. Open the generated domain and create the first admin account.
+1. Create a Railway project and add a service from this GitHub repo.
+2. Set variables (see `.env.example`):
+   - `UUID`: generate with `xray uuid` or `uuidgen`
+   - `MODE`: `ws` (default) or `grpc`
+   - `WS_PATH` (ws only, default `/ws`) / `GRPC_SERVICE` (grpc only, default `grpc`)
+3. Settings -> Networking -> Generate Domain (target port = the `PORT` shown in the service, normally 8080).
+4. Open the deploy logs: a ready `vless://` client link is printed at start.
+5. For the second transport, add another service from the same repo with the other `MODE` and its own domain.
+
+## Client parameters
+
+WebSocket: address = your Railway domain, port 443, TLS on, SNI/host = domain, network `ws`, path = `WS_PATH`.
+
+gRPC: address = your Railway domain, port 443, TLS on, SNI = domain, ALPN `h2`, network `grpc`, mode `gun`, serviceName = `GRPC_SERVICE`.
 
 ## Notes
 
-- The panel does not need the metrics port (`3001`) exposed publicly. Don't generate a domain for it.
-- Changing environment variables requires a redeploy so the container is recreated.
-- Add a Railway volume only if you add stateful files. Panel data lives in Postgres.
-- Remnawave nodes (`remnawave/node`) need a server with its own public IP and open ports, so they can't run on Railway. Run nodes on a VPS and connect them to this panel.
-- The image tag is `remnawave/backend:2`. Pin an exact version in `Dockerfile` if you want repeatable builds.
+- gRPC needs HTTP/2 end to end. If the gRPC service connects but stalls or drops, check whether Railway's edge is passing HTTP/2 to your service; WS is the safer fallback.
+- Private IP ranges are blocked in routing, so the proxy cannot reach Railway's internal network.
+- Pin the xray version with a build arg `XRAY_VERSION` (e.g. `v25.1.30`), otherwise the latest release is used at build time.
+- Make sure you use this in line with Railway's terms of service; proxy/VPN-style traffic may be restricted on some plans.
