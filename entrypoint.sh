@@ -1,46 +1,132 @@
 #!/bin/sh
-# Generates the xray config from environment variables and starts xray.
+# xray-railway: VLESS WS + gRPC on a single Railway port, subscription page for Incy.
+#
+#   Railway edge (TLS) ──> Caddy :$PORT ─┬─ /<ws path>        ──> xray ws   :20001
+#                                        ├─ /<grpc service>/* ──> xray grpc :20002 (h2c)
+#                                        ├─ /<subscription>   ──> sub.py    :20003
+#                                        └─ everything else   ──> 404
+
 set -eu
 
-if [ -z "${UUID:-}" ]; then
-  echo "ERROR: UUID is not set. Generate one with: xray uuid (or uuidgen) and put it in Railway Variables." >&2
+# ───────────────────────────── log helpers ─────────────────────────────
+if [ -n "${NO_COLOR:-}" ]; then
+  RS=''; B=''; D=''; RED=''; GRN=''; YEL=''; BLU=''; MAG=''; CYN=''
+else
+  ESC=$(printf '\033')
+  RS="${ESC}[0m"; B="${ESC}[1m"; D="${ESC}[2m"
+  RED="${ESC}[31m"; GRN="${ESC}[32m"; YEL="${ESC}[33m"
+  BLU="${ESC}[34m"; MAG="${ESC}[35m"; CYN="${ESC}[36m"
+fi
+now()     { date -u '+%H:%M:%S'; }
+ok()      { printf '%s%s%s %s✔%s  %s\n' "$D" "$(now)" "$RS" "$GRN" "$RS" "$*"; }
+warn()    { printf '%s%s%s %s▲%s  %s\n' "$D" "$(now)" "$RS" "$YEL" "$RS" "$*"; }
+fail()    { printf '%s%s%s %s✖%s  %s\n' "$D" "$(now)" "$RS" "$RED" "$RS" "$*" >&2; }
+section() { printf '\n %s▍%s %s%s%s\n' "$MAG" "$RS" "$B" "$*" "$RS"; }
+kv()      { printf '   %s%-8s%s %s\n' "$D" "$1" "$RS" "$2"; }
+
+banner() {
+  printf '\n%s╭──────────────────────────────────────────────────╮%s\n' "$BLU" "$RS"
+  printf '%s│%s  %sxray-railway%s  %s·%s  VLESS  %s·%s  WS + gRPC             %s│%s\n' \
+    "$BLU" "$RS" "$B" "$RS" "$D" "$RS" "$D" "$RS" "$BLU" "$RS"
+  printf '%s╰──────────────────────────────────────────────────╯%s\n' "$BLU" "$RS"
+}
+
+digest()  { printf '%s' "$1" | sha256sum | cut -c1-"$2"; }
+urlenc() {
+  printf '%s' "$1" | sed 's|%|%25|g; s|/|%2F|g; s|?|%3F|g; s|&|%26|g; s|#|%23|g; s|=|%3D|g; s| |%20|g'
+}
+
+banner
+
+# ───────────────────────────── settings ────────────────────────────────
+PORT="${PORT:-8080}"
+LOG_LEVEL="${LOG_LEVEL:-warning}"
+MAX_DEVICES="${MAX_DEVICES:-1}"
+PROFILE_NAME="${PROFILE_NAME:-Railway}"
+FP="${FP:-chrome}"
+STATE_DIR="${STATE_DIR:-/data}"
+SEED="${SEED:-}"
+
+WS_PORT=20001; GRPC_PORT=20002; SUB_PORT=20003
+CONFIG=/tmp/xray.json
+CADDYFILE=/tmp/Caddyfile
+
+# ───────────────────────────── UUID ────────────────────────────────────
+# Priority: UUID env  >  saved on volume  >  derived from Railway IDs  >  random
+STATE_OK=''
+if [ -d "$STATE_DIR" ] && [ -w "$STATE_DIR" ]; then STATE_OK="$STATE_DIR"; fi
+
+UUID="${UUID:-}"
+UUID_SRC='переменная UUID'
+if [ -z "$UUID" ]; then
+  if [ -n "$STATE_OK" ] && [ -s "$STATE_OK/uuid" ]; then
+    UUID=$(cat "$STATE_OK/uuid"); UUID_SRC="том $STATE_DIR"
+  else
+    SEED_STR="${RAILWAY_PROJECT_ID:-}${RAILWAY_SERVICE_ID:-}${RAILWAY_ENVIRONMENT_ID:-}${SEED}"
+    if [ -n "$SEED_STR" ]; then
+      UUID=$(xray uuid -i "xray-railway:$SEED_STR" 2>/dev/null || true)
+      UUID_SRC='автоген. (стабильный, из ID сервиса Railway)'
+    fi
+    if [ -z "$UUID" ]; then
+      UUID=$(cat /proc/sys/kernel/random/uuid)
+      UUID_SRC='автоген. (случайный)'
+    fi
+    if [ -n "$STATE_OK" ]; then
+      printf '%s' "$UUID" > "$STATE_OK/uuid"
+      UUID_SRC="$UUID_SRC → сохранён в $STATE_DIR"
+    fi
+  fi
+fi
+if ! printf '%s' "$UUID" | grep -Eiq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+  fail "UUID '$UUID' некорректен. Удалите переменную UUID — он сгенерируется сам."
   exit 1
 fi
 
-PORT="${PORT:-8080}"
-MODE="${MODE:-ws}"
-WS_PATH="${WS_PATH:-/ws}"
-GRPC_SERVICE="${GRPC_SERVICE:-grpc}"
-LOG_LEVEL="${LOG_LEVEL:-warning}"
+# ───────────────── obfuscated (but stable) paths ───────────────────────
+WS_PATH="${WS_PATH:-/$(digest "ws:$UUID$SEED" 16)}"
+GRPC_SERVICE="${GRPC_SERVICE:-$(digest "grpc:$UUID$SEED" 16)}"
+SUB_PAGE_PATH="${SUB_PATH:-/$(digest "a:$UUID$SEED" 8)/$(digest "b:$UUID$SEED" 12)/$(digest "c:$UUID$SEED" 20)}"
+SUB_PAGE_PATH="/${SUB_PAGE_PATH#/}"; SUB_PAGE_PATH="${SUB_PAGE_PATH%/}"
+SUB_FEED_PATH="$SUB_PAGE_PATH/$(digest "feed:$UUID$SEED" 24)"
+case "$WS_PATH" in /*) ;; *) WS_PATH="/$WS_PATH" ;; esac
 
-case "$MODE" in
-  ws)
-    STREAM='{"network":"ws","security":"none","wsSettings":{"path":"'"$WS_PATH"'"}}'
-    ;;
-  grpc)
-    STREAM='{"network":"grpc","security":"none","grpcSettings":{"serviceName":"'"$GRPC_SERVICE"'"}}'
-    ;;
-  *)
-    echo "ERROR: MODE must be 'ws' or 'grpc', got '$MODE'" >&2
-    exit 1
-    ;;
-esac
+# ───────────────────── public address / DPI params ─────────────────────
+DOMAIN="${DOMAIN:-${RAILWAY_PUBLIC_DOMAIN:-}}"
+if [ -z "$DOMAIN" ]; then
+  warn "Нет публичного домена: Railway → Settings → Networking → Generate Domain."
+  DOMAIN="YOUR-DOMAIN.up.railway.app"
+fi
+ADDRESS="${ADDRESS:-$DOMAIN}"   # куда реально подключаться (можно IP/CDN-хост)
+SNI="${SNI:-$DOMAIN}"           # TLS SNI
+HTTP_HOST="${HTTP_HOST:-$DOMAIN}"  # Host / authority — по нему Railway выбирает сервис
+PUBLIC_BASE="https://$DOMAIN"
+REMARK=$(urlenc "$PROFILE_NAME")
 
-CONFIG=/tmp/config.json
+LINK_WS="vless://$UUID@$ADDRESS:443?encryption=none&security=tls&sni=$SNI&fp=$FP&alpn=http%2F1.1&type=ws&host=$HTTP_HOST&path=$(urlenc "$WS_PATH")#$REMARK-WS"
+LINK_GRPC="vless://$UUID@$ADDRESS:443?encryption=none&security=tls&sni=$SNI&fp=$FP&alpn=h2&type=grpc&serviceName=$GRPC_SERVICE&authority=$HTTP_HOST&mode=gun#$REMARK-gRPC"
+
+# ───────────────────────────── xray config ─────────────────────────────
 cat > "$CONFIG" <<EOF
 {
   "log": { "loglevel": "$LOG_LEVEL" },
   "inbounds": [
     {
-      "tag": "vless-in",
-      "listen": "0.0.0.0",
-      "port": $PORT,
+      "tag": "vless-ws",
+      "listen": "127.0.0.1",
+      "port": $WS_PORT,
       "protocol": "vless",
-      "settings": {
-        "clients": [ { "id": "$UUID" } ],
-        "decryption": "none"
-      },
-      "streamSettings": $STREAM
+      "settings": { "clients": [ { "id": "$UUID" } ], "decryption": "none" },
+      "streamSettings": { "network": "ws", "security": "none", "wsSettings": { "path": "$WS_PATH" } },
+      "sniffing": { "enabled": true, "destOverride": ["http", "tls"], "routeOnly": true }
+    },
+    {
+      "tag": "vless-grpc",
+      "listen": "127.0.0.1",
+      "port": $GRPC_PORT,
+      "protocol": "vless",
+      "settings": { "clients": [ { "id": "$UUID" } ], "decryption": "none" },
+      "streamSettings": { "network": "grpc", "security": "none", "grpcSettings": { "serviceName": "$GRPC_SERVICE" } },
+      "sniffing": { "enabled": true, "destOverride": ["http", "tls"], "routeOnly": true }
     }
   ],
   "outbounds": [
@@ -49,24 +135,115 @@ cat > "$CONFIG" <<EOF
   ],
   "routing": {
     "rules": [
-      { "type": "field", "ip": ["geoip:private"], "outboundTag": "block" }
+      { "type": "field", "ip": ["geoip:private"], "outboundTag": "block" },
+      { "type": "field", "protocol": ["bittorrent"], "outboundTag": "block" }
     ]
   }
 }
 EOF
 
-# Print a ready-to-import client link when Railway gives us the public domain.
-DOMAIN="${RAILWAY_PUBLIC_DOMAIN:-}"
-if [ -n "$DOMAIN" ]; then
-  if [ "$MODE" = "ws" ]; then
-    ENC_PATH=$(printf '%s' "$WS_PATH" | sed 's|/|%2F|g')
-    echo "Client link: vless://$UUID@$DOMAIN:443?encryption=none&security=tls&sni=$DOMAIN&type=ws&host=$DOMAIN&path=$ENC_PATH#railway-ws"
-  else
-    echo "Client link: vless://$UUID@$DOMAIN:443?encryption=none&security=tls&sni=$DOMAIN&alpn=h2&type=grpc&serviceName=$GRPC_SERVICE&mode=gun#railway-grpc"
-  fi
-else
-  echo "RAILWAY_PUBLIC_DOMAIN is empty: generate a public domain for this service to get a client link."
-fi
+# ───────────────────────────── caddy router ────────────────────────────
+cat > "$CADDYFILE" <<EOF
+{
+	admin off
+	auto_https off
+	log {
+		output stderr
+		format console
+		level WARN
+	}
+	servers {
+		protocols h1 h2c
+	}
+}
 
-echo "Starting xray-core: mode=$MODE port=$PORT"
-exec xray run -config "$CONFIG"
+:$PORT {
+	header -Server
+	header X-Robots-Tag "noindex, nofollow, noarchive, nosnippet"
+
+	handle /robots.txt {
+		header Content-Type "text/plain; charset=utf-8"
+		respond "User-agent: *
+Disallow: /
+" 200
+	}
+
+	@ws path $WS_PATH
+	handle @ws {
+		reverse_proxy 127.0.0.1:$WS_PORT
+	}
+
+	@grpc path /$GRPC_SERVICE/*
+	handle @grpc {
+		reverse_proxy h2c://127.0.0.1:$GRPC_PORT {
+			flush_interval -1
+		}
+	}
+
+	@sub path $SUB_PAGE_PATH $SUB_PAGE_PATH/*
+	handle @sub {
+		reverse_proxy 127.0.0.1:$SUB_PORT
+	}
+
+	handle {
+		respond "Not Found" 404
+	}
+}
+EOF
+
+# ───────────────────────────── preflight ───────────────────────────────
+xray run -test -config "$CONFIG" >/tmp/xray-test.log 2>&1 || { fail "Конфиг xray не прошёл проверку:"; cat /tmp/xray-test.log >&2; exit 1; }
+caddy validate --config "$CADDYFILE" --adapter caddyfile >/tmp/caddy-test.log 2>&1 || { fail "Caddyfile не прошёл проверку:"; cat /tmp/caddy-test.log >&2; exit 1; }
+
+# ───────────────────────────── summary ─────────────────────────────────
+section "Идентификация"
+kv UUID   "${B}$UUID${RS}"
+kv source "${D}$UUID_SRC${RS}"
+[ -z "$STATE_OK" ] && kv note "${D}без тома UUID берётся из ID сервиса и не меняется между деплоями${RS}"
+
+section "Транспорты"
+kv WS     "path    ${CYN}$WS_PATH${RS}"
+kv gRPC   "service ${CYN}$GRPC_SERVICE${RS}  ${D}(mode gun)${RS}"
+
+section "Обход DPI"
+kv SNI    "$SNI"
+kv Host   "$HTTP_HOST"
+kv Addr   "$ADDRESS:443"
+kv uTLS   "fp=$FP   ${D}ALPN: ws→http/1.1, grpc→h2${RS}"
+kv Paths  "${D}случайные, стабильные; блок BitTorrent и private-IP${RS}"
+
+section "Подписка для Incy"
+kv Page   "${GRN}$PUBLIC_BASE$SUB_PAGE_PATH${RS}"
+kv Devices "$([ "$MAX_DEVICES" -gt 0 ] && echo "максимум $MAX_DEVICES (по HWID клиента)" || echo "без ограничений")"
+kv Robots "${D}/robots.txt → Disallow: /, X-Robots-Tag: noindex${RS}"
+
+section "Ссылки"
+printf '   %sWebSocket%s\n   %s%s%s\n\n' "$B" "$RS" "$CYN" "$LINK_WS" "$RS"
+printf '   %sgRPC%s\n   %s%s%s\n\n' "$B" "$RS" "$CYN" "$LINK_GRPC" "$RS"
+
+# ───────────────────────────── start ───────────────────────────────────
+export SUB_PAGE_PATH SUB_FEED_PATH PUBLIC_BASE LINK_WS LINK_GRPC PROFILE_NAME MAX_DEVICES NO_COLOR
+export SUB_INTERNAL_PORT="$SUB_PORT" STATE_DIR_OK="$STATE_OK"
+
+xray run -config "$CONFIG" & XRAY_PID=$!
+python3 /sub.py & SUB_PID=$!
+caddy run --config "$CADDYFILE" --adapter caddyfile & CADDY_PID=$!
+
+stop() { kill "$XRAY_PID" "$SUB_PID" "$CADDY_PID" 2>/dev/null || true; }
+trap 'stop; exit 0' TERM INT
+
+sleep 1
+for pair in "xray:$XRAY_PID" "sub:$SUB_PID" "caddy:$CADDY_PID"; do
+  name=${pair%%:*}; pid=${pair##*:}
+  if kill -0 "$pid" 2>/dev/null; then ok "$name запущен"; else fail "$name не стартовал"; stop; exit 1; fi
+done
+ok "Слушаю порт ${B}$PORT${RS}  ${D}— готово к подключениям${RS}"
+
+# watchdog: если любой процесс упал — выходим, Railway перезапустит контейнер
+while :; do
+  for pair in "xray:$XRAY_PID" "sub:$SUB_PID" "caddy:$CADDY_PID"; do
+    name=${pair%%:*}; pid=${pair##*:}
+    kill -0 "$pid" 2>/dev/null || { fail "$name завершился, перезапуск контейнера"; stop; exit 1; }
+  done
+  sleep 2
+done

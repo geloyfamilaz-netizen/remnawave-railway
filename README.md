@@ -1,29 +1,52 @@
 # xray-railway
 
-Xray-core on Railway: VLESS over WebSocket or gRPC. TLS is terminated by Railway's edge, xray listens on plain TCP on `$PORT`.
+Xray-core on Railway: **VLESS over WebSocket and gRPC in one service**, plus a hidden
+subscription page with an "Add to Incy" button. TLS is terminated by Railway's edge.
 
-One image, two modes selected by `MODE`. Railway gives one public port per service, so deploy the same repo twice to get both transports.
+```
+Railway edge ─> Caddy :$PORT ─┬─ /<ws path>          ─> xray (ws)
+                              ├─ /<grpc service>/*   ─> xray (grpc, h2c)
+                              ├─ /<hidden path>      ─> subscription page
+                              └─ anything else       ─> 404
+```
 
 ## Deploy
 
-1. Create a Railway project and add a service from this GitHub repo.
-2. Set variables (see `.env.example`):
-   - `UUID`: generate with `xray uuid` or `uuidgen`
-   - `MODE`: `ws` (default) or `grpc`
-   - `WS_PATH` (ws only, default `/ws`) / `GRPC_SERVICE` (grpc only, default `grpc`)
-3. Settings -> Networking -> Generate Domain (target port = the `PORT` shown in the service, normally 8080).
-4. Open the deploy logs: a ready `vless://` client link is printed at start.
-5. For the second transport, add another service from the same repo with the other `MODE` and its own domain.
+1. New Railway service from this repo.
+2. Settings → Networking → **Generate Domain** (target port = `PORT`, normally 8080).
+3. Open the deploy logs: UUID, paths, both `vless://` links and the subscription page URL are printed.
 
-## Client parameters
+No variables are required. See `.env.example` for overrides.
 
-WebSocket: address = your Railway domain, port 443, TLS on, SNI/host = domain, network `ws`, path = `WS_PATH`.
+## What's automatic
 
-gRPC: address = your Railway domain, port 443, TLS on, SNI = domain, ALPN `h2`, network `grpc`, mode `gun`, serviceName = `GRPC_SERVICE`.
+- **UUID** — taken from `UUID` if set, else from a volume at `STATE_DIR`, else derived from the
+  Railway service IDs (stable between deploys), else random.
+- **Paths** — WS path, gRPC service name and the subscription path are random-looking hashes
+  derived from the UUID. Nothing is served at `/`.
+- **robots.txt** — `Disallow: /` plus `X-Robots-Tag: noindex, nofollow` on every response and a
+  `noindex` meta on the page. The hidden path is never listed in robots.txt.
+- **Client links** — `security=tls`, `fp=chrome` (uTLS), SNI, Host/authority, ALPN (`http/1.1` for WS,
+  `h2` for gRPC). Override with `SNI`, `ADDRESS`, `HTTP_HOST`, `FP`.
+- BitTorrent and private IP ranges are blocked in routing.
+
+## Subscription page / Incy
+
+The page lives at `https://<domain>/<hidden>/<path>`. It shows the WS and gRPC links, the combined
+subscription URL and an **Add to Incy** button (`incy://import/<subscription url>`).
+
+## Device limit (`MAX_DEVICES`, default 1)
+
+The subscription feed remembers the first `x-hwid` the client sends and answers 403 to any other.
+Limits: Xray itself has no per-device limit, so this only gates *fetching the subscription* —
+a copied `vless://` link still works anywhere. For hard limits use the Remnawave panel. Without a
+volume the bound device resets on redeploy; clients that send no HWID are not limited.
 
 ## Notes
 
-- gRPC needs HTTP/2 end to end. If the gRPC service connects but stalls or drops, check whether Railway's edge is passing HTTP/2 to your service; WS is the safer fallback.
-- Private IP ranges are blocked in routing, so the proxy cannot reach Railway's internal network.
-- Pin the xray version with a build arg `XRAY_VERSION` (e.g. `v25.1.30`), otherwise the latest release is used at build time.
-- Make sure you use this in line with Railway's terms of service; proxy/VPN-style traffic may be restricted on some plans.
+- gRPC needs HTTP/2 end to end. If it stalls, check Railway's edge and use WS as the fallback.
+- A custom `SNI` only works if your Railway edge serves a certificate for that name
+  (e.g. your own domain attached to the service).
+- `XRAY_VERSION` build arg pins the Xray release (e.g. `v25.1.30`).
+- `MODE` is gone: both transports run in a single service.
+- Use this in line with Railway's terms of service.
