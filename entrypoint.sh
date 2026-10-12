@@ -1,8 +1,8 @@
 #!/bin/sh
-# xray-railway: VLESS WS + gRPC on a single Railway port, subscription page for Incy.
+# xray-railway: VLESS WS + XHTTP on a single Railway port, subscription page for Incy.
 #
 #   Railway edge (TLS) ──> Caddy :$PORT ─┬─ /<ws path>        ──> xray ws   :20001
-#                                        ├─ /<grpc service>/* ──> xray grpc :20002 (h2c)
+#                                        ├─ /<xhttp path>/*   ──> xray xhttp:20002
 #                                        ├─ /<subscription>   ──> sub.py    :20003
 #                                        └─ everything else   ──> 404
 
@@ -26,7 +26,7 @@ kv()      { printf '   %s%-8s%s %s\n' "$D" "$1" "$RS" "$2"; }
 
 banner() {
   printf '\n%s╭──────────────────────────────────────────────────╮%s\n' "$BLU" "$RS"
-  printf '%s│%s  %sxray-railway%s  %s·%s  VLESS  %s·%s  WS + gRPC            %s│%s\n' \
+  printf '%s│%s  %sxray-railway%s  %s·%s  VLESS  %s·%s  WS + XHTTP           %s│%s\n' \
     "$BLU" "$RS" "$B" "$RS" "$D" "$RS" "$D" "$RS" "$BLU" "$RS"
   printf '%s╰──────────────────────────────────────────────────╯%s\n' "$BLU" "$RS"
 }
@@ -47,7 +47,7 @@ FP="${FP:-chrome}"
 STATE_DIR="${STATE_DIR:-/data}"
 SEED="${SEED:-}"
 
-WS_PORT=20001; GRPC_PORT=20002; SUB_PORT=20003
+WS_PORT=20001; XHTTP_PORT=20002; SUB_PORT=20003
 CONFIG=/tmp/xray.json
 CADDYFILE=/tmp/Caddyfile
 
@@ -85,11 +85,13 @@ fi
 
 # ───────────────── obfuscated (but stable) paths ───────────────────────
 WS_PATH="${WS_PATH:-/$(digest "ws:$UUID$SEED" 16)}"
-GRPC_SERVICE="${GRPC_SERVICE:-$(digest "grpc:$UUID$SEED" 16)}"
+XHTTP_PATH="${XHTTP_PATH:-/$(digest "xhttp:$UUID$SEED" 16)}"
 SUB_PAGE_PATH="${SUB_PATH:-/$(digest "a:$UUID$SEED" 8)/$(digest "b:$UUID$SEED" 12)/$(digest "c:$UUID$SEED" 20)}"
 SUB_PAGE_PATH="/${SUB_PAGE_PATH#/}"; SUB_PAGE_PATH="${SUB_PAGE_PATH%/}"
 SUB_FEED_PATH="$SUB_PAGE_PATH/$(digest "feed:$UUID$SEED" 24)"
 case "$WS_PATH" in /*) ;; *) WS_PATH="/$WS_PATH" ;; esac
+case "$XHTTP_PATH" in /*) ;; *) XHTTP_PATH="/$XHTTP_PATH" ;; esac
+XHTTP_PATH="${XHTTP_PATH%/}"
 
 # ───────────────────── public address / DPI params ─────────────────────
 DOMAIN="${DOMAIN:-${RAILWAY_PUBLIC_DOMAIN:-}}"
@@ -104,7 +106,7 @@ PUBLIC_BASE="https://$DOMAIN"
 REMARK=$(urlenc "$PROFILE_NAME")
 
 LINK_WS="vless://$UUID@$ADDRESS:443?encryption=none&security=tls&sni=$SNI&fp=$FP&alpn=http%2F1.1&type=ws&host=$HTTP_HOST&path=$(urlenc "$WS_PATH")#$REMARK-WS"
-LINK_GRPC="vless://$UUID@$ADDRESS:443?encryption=none&security=tls&sni=$SNI&fp=$FP&alpn=h2&type=grpc&serviceName=$GRPC_SERVICE&authority=$HTTP_HOST&mode=gun#$REMARK-gRPC"
+LINK_XHTTP="vless://$UUID@$ADDRESS:443?encryption=none&security=tls&sni=$SNI&fp=$FP&alpn=h2%2Chttp%2F1.1&type=xhttp&host=$HTTP_HOST&path=$(urlenc "$XHTTP_PATH")&mode=packet-up#$REMARK-XHTTP"
 
 # ───────────────────────────── xray config ─────────────────────────────
 cat > "$CONFIG" <<EOF
@@ -121,12 +123,12 @@ cat > "$CONFIG" <<EOF
       "sniffing": { "enabled": true, "destOverride": ["http", "tls"], "routeOnly": true }
     },
     {
-      "tag": "vless-grpc",
+      "tag": "vless-xhttp",
       "listen": "127.0.0.1",
-      "port": $GRPC_PORT,
+      "port": $XHTTP_PORT,
       "protocol": "vless",
       "settings": { "clients": [ { "id": "$UUID" } ], "decryption": "none" },
-      "streamSettings": { "network": "grpc", "security": "none", "grpcSettings": { "serviceName": "$GRPC_SERVICE" } },
+      "streamSettings": { "network": "xhttp", "security": "none", "xhttpSettings": { "path": "$XHTTP_PATH", "mode": "auto" } },
       "sniffing": { "enabled": true, "destOverride": ["http", "tls"], "routeOnly": true }
     }
   ],
@@ -174,9 +176,9 @@ Disallow: /
 		reverse_proxy 127.0.0.1:$WS_PORT
 	}
 
-	@grpc path /$GRPC_SERVICE/*
-	handle @grpc {
-		reverse_proxy h2c://127.0.0.1:$GRPC_PORT {
+	@xhttp path $XHTTP_PATH $XHTTP_PATH/*
+	handle @xhttp {
+		reverse_proxy 127.0.0.1:$XHTTP_PORT {
 			flush_interval -1
 		}
 	}
@@ -204,13 +206,13 @@ kv source "${D}$UUID_SRC${RS}"
 
 section "Транспорты"
 kv WS     "path    ${CYN}$WS_PATH${RS}"
-kv gRPC   "service ${CYN}$GRPC_SERVICE${RS}  ${D}(mode gun)${RS}"
+kv XHTTP  "path    ${CYN}$XHTTP_PATH${RS}  ${D}(packet-up)${RS}"
 
 section "Обход DPI"
 kv SNI    "$SNI"
 kv Host   "$HTTP_HOST"
 kv Addr   "$ADDRESS:443"
-kv uTLS   "fp=$FP   ${D}ALPN: ws→http/1.1, grpc→h2${RS}"
+kv uTLS   "fp=$FP   ${D}ALPN: ws→http/1.1, xhttp→h2${RS}"
 kv Paths  "${D}случайные, стабильные; блок BitTorrent и private-IP${RS}"
 
 section "Подписка для Incy"
@@ -220,10 +222,10 @@ kv Robots "${D}/robots.txt → Disallow: /, X-Robots-Tag: noindex${RS}"
 
 section "Ссылки"
 printf '   %sWebSocket%s\n   %s%s%s\n\n' "$B" "$RS" "$CYN" "$LINK_WS" "$RS"
-printf '   %sgRPC%s\n   %s%s%s\n\n' "$B" "$RS" "$CYN" "$LINK_GRPC" "$RS"
+printf '   %sXHTTP%s\n   %s%s%s\n\n' "$B" "$RS" "$CYN" "$LINK_XHTTP" "$RS"
 
 # ───────────────────────────── start ───────────────────────────────────
-export SUB_PAGE_PATH SUB_FEED_PATH PUBLIC_BASE LINK_WS LINK_GRPC PROFILE_NAME MAX_DEVICES NO_COLOR
+export SUB_PAGE_PATH SUB_FEED_PATH PUBLIC_BASE LINK_WS LINK_XHTTP PROFILE_NAME MAX_DEVICES NO_COLOR
 export SUB_INTERNAL_PORT="$SUB_PORT" STATE_DIR_OK="$STATE_OK"
 
 xray run -config "$CONFIG" & XRAY_PID=$!

@@ -1,5 +1,5 @@
-# Xray-core (VLESS over WebSocket + gRPC on one port) for Railway.
-# Railway terminates TLS at its edge; Caddy routes by path on plain HTTP/h2c.
+# Xray-core (VLESS over WebSocket + XHTTP on one port) for Railway.
+# Railway terminates TLS at its edge; Caddy routes by path on plain HTTP.
 
 FROM alpine:3.20 AS download
 

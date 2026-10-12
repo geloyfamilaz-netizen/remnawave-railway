@@ -20,7 +20,7 @@ PAGE_PATH = E["SUB_PAGE_PATH"]
 FEED_PATH = E["SUB_FEED_PATH"]
 BASE_URL = E["PUBLIC_BASE"]
 LINK_WS = E["LINK_WS"]
-LINK_GRPC = E["LINK_GRPC"]
+LINK_XHTTP = E["LINK_XHTTP"]
 NAME = E.get("PROFILE_NAME", "Railway")
 MAX_DEVICES = int(E.get("MAX_DEVICES", "1"))
 STATE_DIR = E.get("STATE_DIR_OK", "")
@@ -98,13 +98,13 @@ a.l{color:var(--acc)}
 </style></head><body><main>
 <span class="badge">Лимит устройств: __MAX__</span>
 <h1>__NAME__</h1>
-<p class="sub">Две точки входа: WebSocket и gRPC. Если одна режется — переключитесь на другую.</p>
+<p class="sub">Две точки входа: WebSocket и XHTTP. Если одна режется — переключитесь на другую.</p>
 <a class="cta" href="__INCY__">＋ Добавить в Incy</a>
 <div class="card"><h2>Подписка <span class="tag">обе ссылки сразу</span></h2>
 <code id="c0">__FEED__</code><button data-c="c0">Скопировать подписку</button></div>
 <div class="card"><h2>VLESS · WebSocket <span class="tag">TLS · http/1.1</span></h2>
 <code id="c1">__WS__</code><button data-c="c1">Скопировать ссылку</button></div>
-<div class="card"><h2>VLESS · gRPC <span class="tag">TLS · h2</span></h2>
+<div class="card"><h2>VLESS · XHTTP <span class="tag">TLS · h2 · packet-up</span></h2>
 <code id="c2">__GRPC__</code><button data-c="c2">Скопировать ссылку</button></div>
 <small>Не открылось? Установите <a class="l" href="https://apps.apple.com/app/incy/id6756943388">Incy</a> и нажмите кнопку ещё раз,<br>либо вставьте ссылку подписки вручную.</small>
 </main><script>
@@ -121,10 +121,10 @@ PAGE = (
     .replace("__INCY__", html.escape(INCY_URL, quote=True))
     .replace("__FEED__", html.escape(FEED_URL))
     .replace("__WS__", html.escape(LINK_WS))
-    .replace("__GRPC__", html.escape(LINK_GRPC))
+    .replace("__GRPC__", html.escape(LINK_XHTTP))
 ).encode()
 
-FEED = base64.b64encode((LINK_WS + "\n" + LINK_GRPC + "\n").encode())
+FEED = base64.b64encode((LINK_WS + "\n" + LINK_XHTTP + "\n").encode())
 TITLE = "base64:" + base64.b64encode(NAME.encode()).decode()
 
 
