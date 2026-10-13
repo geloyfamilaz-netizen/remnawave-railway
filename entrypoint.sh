@@ -11,6 +11,11 @@
 # Reality inbounds listen on their own ports (for Railway TCP proxies).
 set -eu
 
+# ---------- preflight: files that must be in the image ----------
+for f in /app/sub.py /app/derive.py /app/config.env; do
+  [ -f "$f" ] || { echo "ERROR: $f is missing in the image. The Dockerfile in the repo is outdated or the file was not committed: it must contain 'COPY sub.py derive.py config.env /app/' and all three files must be in the repo root." >&2; exit 1; }
+done
+
 # ---------- config.env (env wins) ----------
 CONFIG_FILE=/app/config.env
 CFG_LOADED=0
