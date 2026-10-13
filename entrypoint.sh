@@ -12,8 +12,8 @@
 set -eu
 
 # ---------- preflight: files that must be in the image ----------
-for f in /app/sub.py /app/derive.py /app/config.env; do
-  [ -f "$f" ] || { echo "ERROR: $f is missing in the image. The Dockerfile in the repo is outdated or the file was not committed: it must contain 'COPY sub.py derive.py config.env /app/' and all three files must be in the repo root." >&2; exit 1; }
+for f in /app/sub.py /app/derive.py /app/config.env /srv/www/index.html /srv/www/404.html; do
+  [ -f "$f" ] || { echo "ERROR: $f is missing in the image. The Dockerfile in the repo is outdated or the file was not committed: it must contain 'COPY sub.py derive.py config.env /app/' and 'COPY index.html 404.html /srv/www/', and all those files must be in the repo root." >&2; exit 1; }
 done
 
 # ---------- config.env (env wins) ----------

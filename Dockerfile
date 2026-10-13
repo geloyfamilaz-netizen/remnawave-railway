@@ -26,7 +26,7 @@ RUN apk add --no-cache ca-certificates jq python3 \
 
 COPY --from=download /out/xray /out/caddy /usr/local/bin/
 COPY --from=download /out/geoip.dat /out/geosite.dat /usr/local/share/xray/
-COPY www/ /srv/www/
+COPY index.html 404.html /srv/www/
 COPY sub.py derive.py config.env /app/
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
