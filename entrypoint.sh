@@ -53,7 +53,10 @@ if [ -z "${UUID:-}" ]; then
 fi
 
 
-PORT="${PORT:-8080}"
+# Railway may inject its own PORT (even one of the TCP-proxy ports): ignore it.
+# Caddy listens on HTTP_PORT, which must equal the domain target port in Railway Networking.
+INJECTED_PORT="${PORT:-}"
+HTTP_PORT="${HTTP_PORT:-8080}"
 LOG_LEVEL="${LOG_LEVEL:-warning}"
 
 ENABLE_WS="${ENABLE_WS:-1}"
@@ -91,6 +94,15 @@ SUB_INTERNAL_PORT=20003
 PROFILE_NAME="${PROFILE_NAME:-Railway}"
 MAX_DEVICES="${MAX_DEVICES:-1}"
 STATE_DIR="${STATE_DIR:-}"
+
+SEEN=""
+for kv in "http=$HTTP_PORT" "reality-xhttp=$REALITY_XHTTP_PORT" "reality-grpc=$REALITY_GRPC_PORT" "ws=10001" "xhttp=10002" "grpc=10003" "sub=$SUB_INTERNAL_PORT"; do
+  n=${kv%%=*}; p=${kv#*=}
+  [ "$p" = 0 ] && continue
+  prev=$(printf '%s\n' $SEEN | grep "^$p:" | cut -d: -f2 || true)
+  [ -z "$prev" ] || { echo "ERROR: port $p is used by both '$prev' and '$n' (check HTTP_PORT / REALITY_*_PORT in config.env)" >&2; exit 1; }
+  SEEN="$SEEN $p:$n"
+done
 
 XRAY_CFG=/tmp/xray.json
 CADDY_CFG=/tmp/Caddyfile
@@ -189,7 +201,7 @@ cat <<CADDY
 		protocols h1 h2c
 	}
 }
-:$PORT {
+:$HTTP_PORT {
 	header -Server
 CADDY
 if [ "$ENABLE_WS" = 1 ]; then cat <<CADDY
@@ -282,6 +294,7 @@ echo "=== Config ==="
 echo "config.env: $CFG_LOADED values loaded; overridden by Railway variables:${CFG_OVERRIDDEN:- none}"
 echo "uuid: $UUID  [$UUID_SRC]"
 echo "domain: $D$([ "$D_OK" = 1 ] || echo '  (WARN: no Railway domain yet: Networking -> Generate Domain, or set PUBLIC_DOMAIN)')"
+echo "http port: $HTTP_PORT (Railway-injected PORT=${INJECTED_PORT:-unset} is ignored; domain target port must be $HTTP_PORT)"
 echo "transports: ws=$ENABLE_WS xhttp=$ENABLE_XHTTP grpc=$ENABLE_GRPC reality=$REALITY_ON warp=$WARP_ON sub=$ENABLE_SUB  (fp=$FP)"
 if [ "$REALITY_ON" = 1 ]; then
   echo "reality: key $REALITY_KEY_SRC | sni=$REALITY_SNI dest=$REALITY_DEST"
@@ -350,11 +363,31 @@ if [ "$ENABLE_SUB" = 1 ]; then
   fi
 fi
 
+# ---------- validate generated configs ----------
+echo "=== Self-check ==="
+if XOUT=$(xray run -test -config "$XRAY_CFG" 2>&1); then echo "xray config: OK"; else echo "ERROR: xray rejected its config:" >&2; echo "$XOUT" >&2; exit 1; fi
+if COUT=$(caddy validate --config "$CADDY_CFG" --adapter caddyfile 2>&1); then echo "caddy config: OK"; else echo "ERROR: caddy rejected its config:" >&2; echo "$COUT" >&2; exit 1; fi
+
 # ---------- run all, die together ----------
 xray run -config "$XRAY_CFG" & XPID=$!
 caddy run --config "$CADDY_CFG" --adapter caddyfile & CPID=$!
 trap 'kill $XPID $CPID $SPID 2>/dev/null; exit 0' TERM INT
-echo "Started: xray=$XPID caddy=$CPID sub=${SPID:-off} port=$PORT reality=$REALITY_ON"
+EXPECT="$HTTP_PORT"
+if [ "$REALITY_ON" = 1 ]; then
+  if [ "$REALITY_XHTTP_PORT" != 0 ]; then EXPECT="$EXPECT $REALITY_XHTTP_PORT"; fi
+  if [ "$REALITY_GRPC_PORT" != 0 ]; then EXPECT="$EXPECT $REALITY_GRPC_PORT"; fi
+fi
+listening() { grep -qiE ":$(printf '%04X' "$1") [0-9A-F:]+ 0A " /proc/net/tcp /proc/net/tcp6 2>/dev/null; }
+echo "Started: xray=$XPID caddy=$CPID sub=${SPID:-off} http=$HTTP_PORT reality=$REALITY_ON"
+WAITED=0; MISSING="$EXPECT"
+while [ "$WAITED" -lt 20 ]; do
+  MISSING=""
+  for p in $EXPECT; do listening "$p" || MISSING="$MISSING $p"; done
+  [ -z "$MISSING" ] && break
+  kill -0 $XPID 2>/dev/null && kill -0 $CPID 2>/dev/null || break
+  sleep 1; WAITED=$((WAITED + 1))
+done
+if [ -z "$MISSING" ]; then echo "Listening OK on ports: $EXPECT"; else echo "WARN: nothing listening on port(s):$MISSING after ${WAITED}s (expected: $EXPECT)" >&2; fi
 while kill -0 $XPID 2>/dev/null && kill -0 $CPID 2>/dev/null && { [ -z "$SPID" ] || kill -0 $SPID 2>/dev/null; }; do sleep 2; done
 echo "A process exited, stopping container" >&2
 kill $XPID $CPID $SPID 2>/dev/null || true

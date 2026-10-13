@@ -14,7 +14,7 @@ Xray-core на Railway за сайтом-заглушкой. В браузере
 
 ## Деплой
 1. Сервис из этого репозитория (переменные не нужны). Все файлы лежат в корне, без папок: так их не потерять при загрузке через веб-интерфейс GitHub.
-2. Networking -> Generate Domain, target port = 8080.
+2. Networking -> Generate Domain, target port = 8080 (`HTTP_PORT` в `config.env`). Переменную `PORT`, которую может подставить Railway, проект игнорирует.
 3. Networking -> два TCP-прокси: порт приложения 4443 и 5443.
 4. Впишите адреса прокси в `config.env` ровно как их показывает Railway и сделайте redeploy:
    ```
