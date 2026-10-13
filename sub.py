@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """Subscription page + feed for xray-railway (stdlib only).
 
-Routes (everything else -> 404):
-  GET <SUB_PAGE_PATH>   HTML page with both links and the "Add to Incy" button
-  GET <SUB_FEED_PATH>   base64 subscription (what Incy downloads)
+Everything is read from a JSON file written by entrypoint.sh (SUB_CONFIG,
+default /tmp/sub.json), so no per-setting env vars are needed:
 
-Device limit: if the client sends an `x-hwid` header, the first MAX_DEVICES
+  {"page_path": "/s/..", "feed_path": "/f/..", "base_url": "https://host",
+   "name": "Railway", "max_devices": 1, "state_dir": "", "port": 20003,
+   "links": [{"name": "rw-ws", "tag": "TLS · http/1.1", "url": "vless://..."}]}
+
+Routes (everything else -> 404):
+  GET <page_path>   HTML page with every link and the "Add to Incy" button
+  GET <feed_path>   base64 subscription (what Incy downloads)
+
+Device limit: if the client sends an `x-hwid` header, the first max_devices
 distinct HWIDs are remembered and everyone else gets 403.
 """
 import base64
@@ -15,23 +22,22 @@ import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-E = os.environ
-PAGE_PATH = E["SUB_PAGE_PATH"]
-FEED_PATH = E["SUB_FEED_PATH"]
-BASE_URL = E["PUBLIC_BASE"]
-LINK_WS = E["LINK_WS"]
-LINK_XHTTP = E["LINK_XHTTP"]
-NAME = E.get("PROFILE_NAME", "Railway")
-MAX_DEVICES = int(E.get("MAX_DEVICES", "1"))
-STATE_DIR = E.get("STATE_DIR_OK", "")
+CFG = json.load(open(os.environ.get("SUB_CONFIG", "/tmp/sub.json"), encoding="utf-8"))
+PAGE_PATH = CFG["page_path"]
+FEED_PATH = CFG["feed_path"]
+BASE_URL = CFG["base_url"]
+LINKS = CFG["links"]
+NAME = CFG.get("name") or "Railway"
+MAX_DEVICES = int(CFG.get("max_devices", 1))
+STATE_DIR = CFG.get("state_dir") or ""
 DEV_FILE = os.path.join(STATE_DIR, "devices.json") if STATE_DIR else ""
-PORT = int(E.get("SUB_INTERNAL_PORT", "20003"))
+PORT = int(CFG.get("port", 20003))
 
 FEED_URL = BASE_URL + FEED_PATH
 INCY_URL = "incy://import/" + FEED_URL
 
 D, G, Y, R = "\033[2m", "\033[32m", "\033[33m", "\033[0m"
-if E.get("NO_COLOR"):
+if os.environ.get("NO_COLOR"):
     D = G = Y = R = ""
 
 
@@ -82,13 +88,13 @@ body{background:radial-gradient(900px 500px at 50% -10%,#16223a,var(--bg));color
 font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;min-height:100vh;display:flex;justify-content:center;padding:28px 16px}
 main{width:100%;max-width:520px}
 h1{font-size:22px;margin:0 0 4px}p.sub{margin:0 0 20px;color:var(--mut);font-size:14px}
-.badge{display:inline-block;font-size:12px;padding:3px 10px;border:1px solid var(--line);border-radius:99px;color:var(--mut);margin-bottom:14px}
+.badge{display:inline-block;font-size:12px;padding:3px 10px;border:1px solid var(--line);border-radius:99px;color:var(--mut);margin:0 6px 14px 0}
 .cta{display:block;text-align:center;text-decoration:none;color:#fff;font-weight:600;padding:15px;border-radius:14px;
 background:linear-gradient(135deg,var(--acc),var(--acc2));box-shadow:0 8px 24px #4f8cff33;margin-bottom:22px}
 .cta:active{transform:scale(.98)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}
-.card h2{font-size:14px;margin:0 0 8px;display:flex;justify-content:space-between;align-items:center}
-.tag{font-size:11px;color:var(--mut);font-weight:400}
+.card h2{font-size:14px;margin:0 0 8px;display:flex;justify-content:space-between;align-items:center;gap:10px}
+.tag{font-size:11px;color:var(--mut);font-weight:400;text-align:right}
 code{display:block;word-break:break-all;font:12px/1.45 ui-monospace,Menlo,monospace;color:#b9c8dc;background:#0b1118;
 border-radius:8px;padding:9px;max-height:84px;overflow:auto}
 button{margin-top:9px;width:100%;background:transparent;color:var(--tx);border:1px solid var(--line);border-radius:10px;padding:10px;font:inherit;font-size:14px;cursor:pointer}
@@ -96,16 +102,13 @@ button.ok{border-color:#2fbf71;color:#2fbf71}
 small{display:block;color:var(--mut);font-size:12px;margin-top:18px;text-align:center}
 a.l{color:var(--acc)}
 </style></head><body><main>
-<span class="badge">Лимит устройств: __MAX__</span>
+<span class="badge">Лимит устройств: __MAX__</span><span class="badge">Подключений: __COUNT__</span>
 <h1>__NAME__</h1>
-<p class="sub">Две точки входа: WebSocket и XHTTP. Если одна режется — переключитесь на другую.</p>
+<p class="sub">Если одно подключение режется — переключитесь на другое.</p>
 <a class="cta" href="__INCY__">＋ Добавить в Incy</a>
-<div class="card"><h2>Подписка <span class="tag">обе ссылки сразу</span></h2>
+<div class="card"><h2>Подписка <span class="tag">все подключения сразу</span></h2>
 <code id="c0">__FEED__</code><button data-c="c0">Скопировать подписку</button></div>
-<div class="card"><h2>VLESS · WebSocket <span class="tag">TLS · http/1.1</span></h2>
-<code id="c1">__WS__</code><button data-c="c1">Скопировать ссылку</button></div>
-<div class="card"><h2>VLESS · XHTTP <span class="tag">TLS · h2 · packet-up</span></h2>
-<code id="c2">__GRPC__</code><button data-c="c2">Скопировать ссылку</button></div>
+__CARDS__
 <small>Не открылось? Установите <a class="l" href="https://apps.apple.com/app/incy/id6756943388">Incy</a> и нажмите кнопку ещё раз,<br>либо вставьте ссылку подписки вручную.</small>
 </main><script>
 document.querySelectorAll("button").forEach(function(b){b.onclick=function(){
@@ -115,16 +118,34 @@ if(navigator.clipboard){navigator.clipboard.writeText(t).then(done)}else{var r=d
 r.selectNode(document.getElementById(b.dataset.c));getSelection().removeAllRanges();getSelection().addRange(r);document.execCommand("copy");done()}}});
 </script></body></html>"""
 
-PAGE = (
-    PAGE_TPL.replace("__NAME__", html.escape(NAME))
-    .replace("__MAX__", str(MAX_DEVICES) if MAX_DEVICES > 0 else "∞")
-    .replace("__INCY__", html.escape(INCY_URL, quote=True))
-    .replace("__FEED__", html.escape(FEED_URL))
-    .replace("__WS__", html.escape(LINK_WS))
-    .replace("__GRPC__", html.escape(LINK_XHTTP))
-).encode()
+CARD_TPL = (
+    '<div class="card"><h2>{title} <span class="tag">{tag}</span></h2>'
+    '<code id="c{n}">{url}</code><button data-c="c{n}">Скопировать ссылку</button></div>'
+)
 
-FEED = base64.b64encode((LINK_WS + "\n" + LINK_XHTTP + "\n").encode())
+
+def build_page():
+    cards = "\n".join(
+        CARD_TPL.format(
+            n=i,
+            title=html.escape(l["name"]),
+            tag=html.escape(l.get("tag", "")),
+            url=html.escape(l["url"]),
+        )
+        for i, l in enumerate(LINKS, 1)
+    )
+    return (
+        PAGE_TPL.replace("__NAME__", html.escape(NAME))
+        .replace("__MAX__", str(MAX_DEVICES) if MAX_DEVICES > 0 else "∞")
+        .replace("__COUNT__", str(len(LINKS)))
+        .replace("__INCY__", html.escape(INCY_URL, quote=True))
+        .replace("__FEED__", html.escape(FEED_URL))
+        .replace("__CARDS__", cards)
+    ).encode()
+
+
+PAGE = build_page()
+FEED = base64.b64encode(("\n".join(l["url"] for l in LINKS) + "\n").encode())
 TITLE = "base64:" + base64.b64encode(NAME.encode()).decode()
 
 
@@ -163,7 +184,6 @@ class Handler(BaseHTTPRequestHandler):
                 ("profile-update-interval", "12"),
             ))
         return self._send(404, b"Not Found\n")
-
 
 
 if __name__ == "__main__":
